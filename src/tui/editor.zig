@@ -12,6 +12,7 @@ const syntax = @import("syntax");
 const file_type_config = @import("file_type_config");
 const project_manager = @import("project_manager");
 const root_mod = @import("soft_root").root;
+const lsp_types = @import("lsp_types");
 
 const Plane = @import("renderer").Plane;
 const Cell = @import("renderer").Cell;
@@ -47,6 +48,81 @@ pub const max_matches = if (builtin.mode == std.builtin.OptimizeMode.Debug) 10_0
 pub const max_match_lines = 15;
 pub const max_match_batch = if (builtin.mode == std.builtin.OptimizeMode.Debug) 100 else 1000;
 pub const min_diagnostic_view_len = 5;
+
+pub const SemanticToken = struct {
+    delta_line: usize,
+    delta_start: usize,
+    length: usize,
+    token_type: u8,
+    token_modifiers: u8,
+};
+
+pub const SemanticTokens = struct {
+    tokens: std.ArrayListUnmanaged(SemanticToken) = .empty,
+
+    pub fn deinit(self: *SemanticTokens, allocator: std.mem.Allocator) void {
+        self.tokens.deinit(allocator);
+    }
+
+    fn read_cbor_uint(iter: *[]const u8) ?u64 {
+        if (iter.len == 0) return null;
+        const byte = iter.*[0];
+        iter.* = iter.*[1..];
+        if (byte < 24) return byte;
+        if (byte == 24) {
+            if (iter.len < 1) return null;
+            const val: u8 = iter.*[0];
+            iter.* = iter.*[1..];
+            return val;
+        }
+        if (byte == 25) {
+            if (iter.len < 2) return null;
+            const val = @as(u16, iter.*[0]) << 8 | @as(u16, iter.*[1]);
+            iter.* = iter.*[2..];
+            return val;
+        }
+        if (byte == 26) {
+            if (iter.len < 4) return null;
+            const val = @as(u32, iter.*[0]) << 24 | @as(u32, iter.*[1]) << 16 | @as(u32, iter.*[2]) << 8 | @as(u32, iter.*[3]);
+            iter.* = iter.*[4..];
+            return val;
+        }
+        return null;
+    }
+
+    pub fn parse(allocator: std.mem.Allocator, data: []const u8) !*SemanticTokens {
+        const tokens = try allocator.create(SemanticTokens);
+        tokens.* = .{};
+
+        var iter = data;
+        var prev_line: usize = 0;
+        var prev_start: usize = 0;
+
+        while (iter.len > 0) {
+            const delta_line = read_cbor_uint(&iter) orelse break;
+            const delta_start = read_cbor_uint(&iter) orelse break;
+            const length = read_cbor_uint(&iter) orelse break;
+            const token_type = read_cbor_uint(&iter) orelse break;
+            const token_modifiers = read_cbor_uint(&iter) orelse break;
+
+            const line = prev_line + delta_line;
+            const start = if (line == prev_line) prev_start + delta_start else delta_start;
+
+            try tokens.tokens.append(allocator, .{
+                .delta_line = line,
+                .delta_start = start,
+                .length = @intCast(length),
+                .token_type = @intCast(token_type),
+                .token_modifiers = @intCast(token_modifiers),
+            });
+
+            prev_line = line;
+            prev_start = start;
+        }
+
+        return tokens;
+    }
+};
 
 pub const whitespace = struct {
     pub const char = struct {
@@ -404,11 +480,15 @@ pub const Editor = struct {
     syntax_last_rendered_root: ?Buffer.Root = null,
     syntax_incremental_reparse: bool = false,
 
+    semantic_tokens: ?*SemanticTokens = null,
+
     insert_triggers: std.ArrayList(TriggerSymbol) = .empty,
     delete_triggers: std.ArrayList(TriggerSymbol) = .empty,
 
     style_cache: ?StyleCache = null,
+    semantic_style_cache: ?StyleCache = null,
     style_cache_theme: []const u8 = "",
+    semantic_style_cache_theme: []const u8 = "",
 
     diagnostics: std.ArrayListUnmanaged(Diagnostic) = .empty,
     diag_errors: usize = 0,
@@ -657,6 +737,10 @@ pub const Editor = struct {
         self.changes.deinit(self.allocator);
         self.clear_event_triggers();
         if (self.syntax) |syn| syn.destroy(tui.query_cache());
+        if (self.semantic_tokens) |tokens| {
+            tokens.deinit(self.allocator);
+            self.allocator.destroy(tokens);
+        }
         self.cancel_all_tabstops();
         self.cursels.deinit(self.allocator);
         self.matches.deinit(self.allocator);
@@ -1119,7 +1203,19 @@ pub const Editor = struct {
         }
         self.style_cache_theme = theme.name;
         const cache: *StyleCache = &self.style_cache.?;
-        self.render_screen(theme, cache, focused);
+
+        if (self.semantic_style_cache) |*cache2| {
+            if (!std.mem.eql(u8, self.semantic_style_cache_theme, theme.name)) {
+                cache2.deinit();
+                self.semantic_style_cache = StyleCache.init(self.allocator);
+            }
+        } else {
+            self.semantic_style_cache = StyleCache.init(self.allocator);
+        }
+        self.semantic_style_cache_theme = theme.name;
+        const semantic_cache: *StyleCache = &self.semantic_style_cache.?;
+
+        self.render_screen(theme, cache, semantic_cache, focused);
         return self.scroll_dest != self.view.row or self.syntax_refresh_full;
     }
 
@@ -1137,7 +1233,7 @@ pub const Editor = struct {
     };
     const CellMap = ViewMap(CellMapEntry, .{});
 
-    fn render_screen(self: *Self, theme: *const Widget.Theme, cache: *StyleCache, focused: bool) void {
+    fn render_screen(self: *Self, theme: *const Widget.Theme, cache: *StyleCache, semantic_cache: *StyleCache, focused: bool) void {
         const ctx = struct {
             self: *Self,
             buf_row: usize,
@@ -1292,6 +1388,9 @@ pub const Editor = struct {
             _ = root.walk_from_line_begin_const(self.view.row, ctx.walker, &ctx_, self.metrics) catch {};
         }
         self.render_syntax(theme, cache, root) catch {};
+        if (self.semantic_tokens != null and self.semantic_tokens.?.tokens.items.len > 0) {
+            self.render_semantic_tokens(theme, semantic_cache, root) catch {};
+        }
         self.render_whitespace_map(theme, ctx_.cell_map) catch {};
         const pc_row_diag = if (tui.config().inline_diagnostics)
             self.render_diagnostics(theme, pc_row, hl_row, ctx_.cell_map)
@@ -1720,6 +1819,50 @@ pub const Editor = struct {
         return syn.render(&ctx, Ctx.cb, range);
     }
 
+    fn render_semantic_tokens(self: *Self, theme: *const Widget.Theme, semantic_cache: *StyleCache, root: Buffer.Root) !void {
+        _ = root;
+        const tokens = self.semantic_tokens orelse return;
+        const frame = tracy.initZone(@src(), .{ .name = "editor render semantic tokens" });
+        defer frame.deinit();
+
+        for (tokens.tokens.items) |token| {
+            const row = token.delta_line;
+            const start_col = token.delta_start;
+            const end_col = start_col + token.length;
+
+            if (row < self.view.row) continue;
+            if (row > self.view.row + self.view.rows) break;
+
+            if (end_col < self.view.col) continue;
+            if (start_col > self.view.col + self.view.cols) continue;
+
+            const type_name = lsp_types.SemanticTokenType.from_index(token.token_type) orelse continue;
+            const scope = lsp_types.SemanticTokenType.name(type_name);
+
+            const style_ = style_cache_lookup(theme, semantic_cache, scope, token.token_type);
+            if (style_ == null) {
+                std.log.warn("no style for semantic token type: {s} (index {})", .{ scope, token.token_type });
+                continue;
+            }
+            const style = style_.?.style;
+
+            const begin_col = @max(start_col, self.view.col);
+            const end_col_clamped = @min(end_col, self.view.col + self.view.cols);
+            const y = row - self.view.row;
+            const x = begin_col - self.view.col;
+            const end_x = end_col_clamped - self.view.col;
+
+            if (x >= end_x) continue;
+            for (x..end_x) |x_| {
+                self.plane.cursor_move_yx(@intCast(y), @intCast(x_));
+                var cell = self.plane.cell_init();
+                _ = self.plane.at_cursor_cell(&cell) catch return;
+                cell.set_style(style);
+                _ = self.plane.putc(&cell) catch {};
+            }
+        }
+    }
+
     fn render_whitespace_map(self: *Self, theme: *const Widget.Theme, cell_map: CellMap) !void {
         const col_offset = self.view.col;
         const char = whitespace.char;
@@ -1870,8 +2013,10 @@ pub const Editor = struct {
         return if (cache.get(id)) |sty| ret: {
             break :ret sty;
         } else ret: {
-            const sty = tui.find_scope_style(theme, scope) orelse null;
-            cache.put(id, sty) catch {};
+            const sty = tui.find_scope_style(theme, scope);
+            if (sty) |s| {
+                cache.put(id, s) catch {};
+            }
             break :ret sty;
         };
     }
@@ -2064,8 +2209,14 @@ pub const Editor = struct {
     fn send_editor_update(self: *const Self, old_root: ?Buffer.Root, new_root: ?Buffer.Root, eol_mode: Buffer.EolMode) !void {
         _ = try self.handlers.msg(.{ "E", "update" });
         if (self.buffer) |buffer| {
-            if (self.syntax) |_| if (self.file_path) |file_path| if (old_root != null and new_root != null)
-                project_manager.did_change(file_path, buffer.lsp_version, try text_from_root(new_root, eol_mode), try text_from_root(old_root, eol_mode), eol_mode) catch {};
+            if (self.syntax != null) {
+                if (self.file_path) |file_path| {
+                    if (old_root != null and new_root != null) {
+                        project_manager.did_change(file_path, buffer.lsp_version, try text_from_root(new_root, eol_mode), try text_from_root(old_root, eol_mode), eol_mode) catch {};
+                        project_manager.semantic_tokens(file_path) catch {};
+                    }
+                }
+            }
             auto_save_buffer(buffer, .on_document_change);
         }
     }
@@ -6717,6 +6868,24 @@ pub const Editor = struct {
         self.diag_info = 0;
         self.diag_hints = 0;
         self.send_editor_diagnostics() catch {};
+        self.need_render();
+    }
+
+    pub fn add_semantic_tokens(self: *Self, data: []const u8) !void {
+        if (self.semantic_tokens) |tokens| {
+            tokens.deinit(self.allocator);
+            self.allocator.destroy(tokens);
+        }
+        self.semantic_tokens = try SemanticTokens.parse(self.allocator, data);
+        self.need_render();
+    }
+
+    pub fn clear_semantic_tokens(self: *Self) void {
+        if (self.semantic_tokens) |tokens| {
+            tokens.deinit(self.allocator);
+            self.allocator.destroy(tokens);
+            self.semantic_tokens = null;
+        }
         self.need_render();
     }
 

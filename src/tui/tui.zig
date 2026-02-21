@@ -2109,7 +2109,7 @@ pub const fallbacks: []const FallBack = &[_]FallBack{
     .{ .ts = "variable.readonly.defaultLibrary", .tm = "support.constant" },
     .{ .ts = "variable.readonly", .tm = "variable.other.constant" },
     .{ .ts = "variable.member", .tm = "property" },
-    // .{ .ts = "variable.parameter", .tm = "variable" },
+    .{ .ts = "variable", .tm = "entity.name.variable" },
     // .{ .ts = "variable", .tm = "entity.name.variable" },
     .{ .ts = "label", .tm = "entity.name.label" },
     .{ .ts = "parameter", .tm = "variable.parameter" },

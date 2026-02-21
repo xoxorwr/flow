@@ -1170,6 +1170,43 @@ const cmds = struct {
         },
     };
 
+    pub fn add_semantic_tokens(self: *Self, ctx: Ctx) Result {
+        var file_path: []const u8 = undefined;
+        var data: []const u8 = undefined;
+        if (!try ctx.args.match(.{
+            tp.extract(&file_path),
+            tp.extract(&data),
+        })) return error.InvalidAddSemanticTokensArgument;
+        var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        file_path = project_manager.normalize_file_path(file_path, &file_path_buf);
+        if (self.get_editor_for_file(file_path)) |editor| {
+            try editor.add_semantic_tokens(data);
+        }
+    }
+    pub const add_semantic_tokens_meta: Meta = .{
+        .arguments = &.{
+            .string, // file_path
+            .string, // data (cbor encoded)
+        },
+    };
+
+    pub fn clear_semantic_tokens(self: *Self, ctx: Ctx) Result {
+        var file_path: []const u8 = undefined;
+        if (!try ctx.args.match(.{
+            tp.extract(&file_path),
+        })) return error.InvalidClearSemanticTokensArgument;
+        var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        file_path = project_manager.normalize_file_path(file_path, &file_path_buf);
+        if (self.get_editor_for_file(file_path)) |editor| {
+            editor.clear_semantic_tokens();
+        }
+    }
+    pub const clear_semantic_tokens_meta: Meta = .{
+        .arguments = &.{
+            .string, // file_path
+        },
+    };
+
     pub fn add_document_symbol(self: *Self, ctx: Ctx) Result {
         var file_path: []const u8 = undefined;
         var name: []const u8 = undefined;

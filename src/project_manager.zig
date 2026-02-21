@@ -311,6 +311,13 @@ pub fn hover(file_path: []const u8, row: usize, col: usize) (ProjectManagerError
     return send(.{ "hover", project, file_path, row, col });
 }
 
+pub fn semantic_tokens(file_path: []const u8) (ProjectManagerError || ProjectError)!void {
+    const project = tp.env.get().str("project");
+    if (project.len == 0)
+        return error.NoProject;
+    return send(.{ "semantic_tokens", project, file_path });
+}
+
 pub fn update_mru(file_path: []const u8, row: usize, col: usize, ephemeral: bool) (ProjectManagerError || ProjectError)!void {
     if (ephemeral) return;
     const project = tp.env.get().str("project");
@@ -511,6 +518,8 @@ const Process = struct {
             self.rename_symbol(from, project_directory, path, row, col) catch |e| return from.forward_error(e, @errorReturnTrace()) catch error.ClientFailed;
         } else if (try cbor.match(m.buf, .{ "hover", tp.extract(&project_directory), tp.extract(&path), tp.extract(&row), tp.extract(&col) })) {
             self.hover(from, project_directory, path, row, col) catch |e| return from.forward_error(e, @errorReturnTrace()) catch error.ClientFailed;
+        } else if (try cbor.match(m.buf, .{ "semantic_tokens", tp.extract(&project_directory), tp.extract(&path) })) {
+            self.semantic_tokens(from, project_directory, path) catch |e| return from.forward_error(e, @errorReturnTrace()) catch error.ClientFailed;
         } else if (try cbor.match(m.buf, .{ "get_mru_position", tp.extract(&project_directory), tp.extract(&path) })) {
             self.get_mru_position(from, project_directory, path) catch |e| return from.forward_error(e, @errorReturnTrace()) catch error.ClientFailed;
         } else if (try cbor.match(m.buf, .{ "lsp", "msg", tp.extract(&tag), tp.extract(&message) })) {
@@ -787,6 +796,13 @@ const Process = struct {
         defer frame.deinit();
         const project = self.projects.get(project_directory) orelse return error.NoProject;
         return project.hover(from, file_path, row, col);
+    }
+
+    fn semantic_tokens(self: *Process, from: tp.pid_ref, project_directory: []const u8, file_path: []const u8) (ProjectError || Project.LspError)!void {
+        const frame = tracy.initZone(@src(), .{ .name = module_name ++ ".semantic_tokens" });
+        defer frame.deinit();
+        const project = self.projects.get(project_directory) orelse return error.NoProject;
+        return project.semantic_tokens(from, file_path);
     }
 
     fn get_mru_position(self: *Process, from: tp.pid_ref, project_directory: []const u8, file_path: []const u8) (ProjectError || Project.RequestError)!void {

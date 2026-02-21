@@ -908,6 +908,7 @@ pub fn did_open(self: *Self, from: tp.pid_ref, file_path: []const u8, file_type:
     lsp.send_notification("textDocument/didOpen", .{
         .textDocument = .{ .uri = uri, .languageId = file_type, .version = version, .text = text },
     }) catch return error.LspFailed;
+    self.request_semantic_tokens(from, file_path) catch {};
 }
 
 pub fn did_change(self: *Self, file_path: []const u8, version: usize, text_dst: []const u8, text_src: []const u8, eol_mode: Buffer.EolMode) LspError!void {
@@ -1950,6 +1951,10 @@ pub fn hover(self: *Self, from: tp.pid_ref, file_path: []const u8, row: usize, c
     }, handler) catch return error.LspFailed;
 }
 
+pub fn semantic_tokens(self: *Self, from: tp.pid_ref, file_path: []const u8) LspError!void {
+    try self.request_semantic_tokens(from, file_path);
+}
+
 const HoverError = error{
     InvalidHover,
     InvalidHoverField,
@@ -2042,6 +2047,98 @@ fn send_content_msg(
 
 fn send_content_msg_empty(to: tp.pid_ref, tag: []const u8, file_path: []const u8, row: usize, col: usize) error{}!void {
     return send_content_msg(to, tag, file_path, row, col, "plaintext", "", null);
+}
+
+pub fn request_semantic_tokens(self: *Self, from: tp.pid_ref, file_path: []const u8) LspError!void {
+    const lsp = try self.get_language_server(file_path);
+    const uri = try self.make_URI(file_path);
+    defer self.allocator.free(uri);
+
+    const handler: struct {
+        from: tp.pid,
+        file_path: []const u8,
+        project: *Self,
+
+        pub fn deinit(self_: *@This()) void {
+            self_.from.deinit();
+            std.heap.c_allocator.free(self_.file_path);
+        }
+
+        pub fn receive(self_: @This(), response: tp.message) !void {
+            var result: []const u8 = undefined;
+            if (try cbor.match(response.buf, .{ "child", tp.string, "result", tp.null_ })) {
+                try send_semantic_tokens_empty(self_.from.ref(), self_.file_path);
+            } else if (try cbor.match(response.buf, .{ "child", tp.string, "result", tp.extract_cbor(&result) })) {
+                try send_semantic_tokens(self_.from.ref(), self_.file_path, result);
+            }
+        }
+    } = .{
+        .from = from.clone(),
+        .file_path = try std.heap.c_allocator.dupe(u8, file_path),
+        .project = self,
+    };
+
+    lsp.send_request(self.allocator, "textDocument/semanticTokens/full", .{
+        .textDocument = .{ .uri = uri },
+    }, handler) catch return error.LspFailed;
+}
+
+const SemanticTokensError = error{
+    InvalidSemanticTokens,
+    InvalidSemanticTokensField,
+    InvalidSemanticTokensFieldName,
+} || cbor.Error;
+
+fn send_semantic_tokens(to: tp.pid_ref, file_path: []const u8, result: []const u8) SemanticTokensError!void {
+    var iter = result;
+    var data: std.ArrayListUnmanaged(u8) = .{};
+    defer data.deinit(std.heap.c_allocator);
+
+    var len = cbor.decodeMapHeader(&iter) catch return;
+    while (len > 0) : (len -= 1) {
+        var field_name: []const u8 = undefined;
+        if (!(try cbor.matchString(&iter, &field_name))) return error.InvalidSemanticTokensFieldName;
+        if (std.mem.eql(u8, field_name, "data")) {
+            const arr_len = cbor.decodeArrayHeader(&iter) catch return;
+            var i: usize = 0;
+            while (i < arr_len) : (i += 1) {
+                var val: u64 = 0;
+                if (!(try cbor.matchValue(&iter, cbor.extract(&val)))) return error.InvalidSemanticTokensField;
+                if (val < 24) {
+                    try data.append(std.heap.c_allocator, @intCast(val));
+                } else if (val < 256) {
+                    try data.append(std.heap.c_allocator, 24);
+                    try data.append(std.heap.c_allocator, @intCast(val));
+                } else if (val < 65536) {
+                    try data.append(std.heap.c_allocator, 25);
+                    try data.append(std.heap.c_allocator, @intCast(val >> 8));
+                    try data.append(std.heap.c_allocator, @intCast(val & 0xFF));
+                } else {
+                    try data.append(std.heap.c_allocator, 26);
+                    try data.append(std.heap.c_allocator, @intCast(val >> 24));
+                    try data.append(std.heap.c_allocator, @intCast((val >> 16) & 0xFF));
+                    try data.append(std.heap.c_allocator, @intCast((val >> 8) & 0xFF));
+                    try data.append(std.heap.c_allocator, @intCast(val & 0xFF));
+                }
+            }
+        } else {
+            try cbor.skipValue(&iter);
+        }
+    }
+
+    if (data.items.len > 0) {
+        to.send(.{ "cmd", "add_semantic_tokens", .{ file_path, data.items } }) catch |e| {
+            std.log.err("send add_semantic_tokens failed: {t}", .{e});
+        };
+    } else {
+        try send_semantic_tokens_empty(to, file_path);
+    }
+}
+
+fn send_semantic_tokens_empty(to: tp.pid_ref, file_path: []const u8) error{}!void {
+    to.send(.{ "cmd", "clear_semantic_tokens", .{file_path} }) catch |e| {
+        std.log.err("send clear_semantic_tokens failed: {t}", .{e});
+    };
 }
 
 pub fn publish_diagnostics(self: *Self, to: tp.pid_ref, params_cb: []const u8) DiagnosticError!void {

@@ -119,3 +119,112 @@ pub const CompletionItemKind = enum(u8) {
         };
     }
 };
+
+pub const SemanticTokenType = enum(u8) {
+    namespace = 0,
+    type = 1,
+    @"enum" = 2,
+    @"struct" = 3,
+    parameter = 4,
+    variable = 5,
+    enumMember = 6,
+    function = 7,
+    member = 8,
+    keyword = 9,
+    modifier = 10,
+    comment = 11,
+    string = 12,
+    number = 13,
+    operator = 14,
+    property = 15,
+    method = 16,
+
+    pub fn from_index(i: u8) ?SemanticTokenType {
+        return switch (i) {
+            0 => .namespace,
+            1 => .type,
+            2 => .@"enum",
+            3 => .@"struct",
+            4 => .parameter,
+            5 => .variable,
+            6 => .enumMember,
+            7 => .function,
+            8 => .member,
+            9 => .keyword,
+            10 => .modifier,
+            11 => .comment,
+            12 => .string,
+            13 => .number,
+            14 => .operator,
+            15 => .property,
+            16 => .method,
+            else => null,
+        };
+    }
+
+    pub fn name(t: SemanticTokenType) []const u8 {
+        return switch (t) {
+            .namespace => "namespace",
+            .type => "type",
+            .@"enum" => "enum",
+            .@"struct" => "struct",
+            .parameter => "parameter",
+            .variable => "variable",
+            .enumMember => "enumMember",
+            .function => "function",
+            .member => "member",
+            .keyword => "keyword",
+            .modifier => "modifier",
+            .comment => "comment",
+            .string => "string",
+            .number => "number",
+            .operator => "operator",
+            .property => "property",
+            .method => "method",
+        };
+    }
+};
+
+pub const SemanticTokenModifier = enum(u8) {
+    declaration = 0,
+    definition = 1,
+    readonly = 2,
+    static = 3,
+    deprecated = 4,
+    abstract = 5,
+    async = 6,
+    modification = 7,
+    documentation = 8,
+    defaultLibrary = 9,
+
+    pub fn from_index(i: u8) ?SemanticTokenModifier {
+        return switch (i) {
+            0 => .declaration,
+            1 => .definition,
+            2 => .readonly,
+            3 => .static,
+            4 => .deprecated,
+            5 => .abstract,
+            6 => .async,
+            7 => .modification,
+            8 => .documentation,
+            9 => .defaultLibrary,
+            else => null,
+        };
+    }
+
+    pub fn name(m: SemanticTokenModifier) []const u8 {
+        return switch (m) {
+            .declaration => "declaration",
+            .definition => "definition",
+            .readonly => "readonly",
+            .static => "static",
+            .deprecated => "deprecated",
+            .abstract => "abstract",
+            .async => "async",
+            .modification => "modification",
+            .documentation => "documentation",
+            .defaultLibrary => "defaultLibrary",
+        };
+    }
+};
